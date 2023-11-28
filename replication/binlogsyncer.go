@@ -185,17 +185,15 @@ func NewBinlogSyncer(cfg BinlogSyncerConfig) *BinlogSyncer {
 	b := new(BinlogSyncer)
 
 	b.cfg = cfg
-	if cfg.ParseEnabled {
-		b.parser = NewBinlogParser()
-		b.parser.SetFlavor(cfg.Flavor)
-		b.parser.SetRawMode(b.cfg.RawModeEnabled)
-		b.parser.SetParseTime(b.cfg.ParseTime)
-		b.parser.SetTimestampStringLocation(b.cfg.TimestampStringLocation)
-		b.parser.SetUseDecimal(b.cfg.UseDecimal)
-		b.parser.SetVerifyChecksum(b.cfg.VerifyChecksum)
-		b.parser.SetRowsEventDecodeFunc(b.cfg.RowsEventDecodeFunc)
-		b.parser.SetTableMapOptionalMetaDecodeFunc(b.cfg.TableMapOptionalMetaDecodeFunc)
-	}
+	b.parser = NewBinlogParser()
+	b.parser.SetFlavor(cfg.Flavor)
+	b.parser.SetRawMode(b.cfg.RawModeEnabled)
+	b.parser.SetParseTime(b.cfg.ParseTime)
+	b.parser.SetTimestampStringLocation(b.cfg.TimestampStringLocation)
+	b.parser.SetUseDecimal(b.cfg.UseDecimal)
+	b.parser.SetVerifyChecksum(b.cfg.VerifyChecksum)
+	b.parser.SetRowsEventDecodeFunc(b.cfg.RowsEventDecodeFunc)
+	b.parser.SetTableMapOptionalMetaDecodeFunc(b.cfg.TableMapOptionalMetaDecodeFunc)
 
 	b.running = false
 	b.ctx, b.cancel = context.WithCancel(context.Background())
@@ -804,10 +802,7 @@ func (b *BinlogSyncer) parseEvent(s *BinlogStreamer, data []byte) error {
 		data = data[2:]
 	}
 
-	if !b.cfg.ParseEnabled {
-		// b.cfg.Logger.Infof("skip parse event, len data:%v", len(data))
-		e = &BinlogEvent{RawData: data}
-	} else {
+	if b.cfg.ParseEnabled {
 		e, err := b.parser.Parse(data)
 		if err != nil {
 			return errors.Trace(err)
@@ -869,6 +864,8 @@ func (b *BinlogSyncer) parseEvent(s *BinlogStreamer, data []byte) error {
 				event.GSet = getCurrentGtidSet()
 			}
 		}
+	} else {
+		e = &BinlogEvent{RawData: data}
 	}
 
 	needStop := false
