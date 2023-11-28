@@ -791,6 +791,7 @@ func (b *BinlogSyncer) onStream(s *BinlogStreamer) {
 
 func (b *BinlogSyncer) parseEvent(s *BinlogStreamer, data []byte) error {
 	var e *BinlogEvent
+	var err error
 
 	//skip OK byte, 0x00
 	data = data[1:]
@@ -803,7 +804,7 @@ func (b *BinlogSyncer) parseEvent(s *BinlogStreamer, data []byte) error {
 	}
 
 	if b.cfg.ParseEnabled {
-		e, err := b.parser.Parse(data)
+		e, err = b.parser.Parse(data)
 		if err != nil {
 			return errors.Trace(err)
 		}
