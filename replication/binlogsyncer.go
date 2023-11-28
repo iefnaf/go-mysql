@@ -57,6 +57,8 @@ type BinlogSyncerConfig struct {
 	// If not nil, use the provided tls.Config to connect to the database using TLS/SSL.
 	TLSConfig *tls.Config
 
+	ParseEnabled bool
+
 	// Use replication.Time structure for timestamp and datetime.
 	// We will use Local location for timestamp and UTC location for datatime.
 	ParseTime bool
@@ -183,15 +185,18 @@ func NewBinlogSyncer(cfg BinlogSyncerConfig) *BinlogSyncer {
 	b := new(BinlogSyncer)
 
 	b.cfg = cfg
-	b.parser = NewBinlogParser()
-	b.parser.SetFlavor(cfg.Flavor)
-	b.parser.SetRawMode(b.cfg.RawModeEnabled)
-	b.parser.SetParseTime(b.cfg.ParseTime)
-	b.parser.SetTimestampStringLocation(b.cfg.TimestampStringLocation)
-	b.parser.SetUseDecimal(b.cfg.UseDecimal)
-	b.parser.SetVerifyChecksum(b.cfg.VerifyChecksum)
-	b.parser.SetRowsEventDecodeFunc(b.cfg.RowsEventDecodeFunc)
-	b.parser.SetTableMapOptionalMetaDecodeFunc(b.cfg.TableMapOptionalMetaDecodeFunc)
+	if cfg.ParseEnabled {
+		b.parser = NewBinlogParser()
+		b.parser.SetFlavor(cfg.Flavor)
+		b.parser.SetRawMode(b.cfg.RawModeEnabled)
+		b.parser.SetParseTime(b.cfg.ParseTime)
+		b.parser.SetTimestampStringLocation(b.cfg.TimestampStringLocation)
+		b.parser.SetUseDecimal(b.cfg.UseDecimal)
+		b.parser.SetVerifyChecksum(b.cfg.VerifyChecksum)
+		b.parser.SetRowsEventDecodeFunc(b.cfg.RowsEventDecodeFunc)
+		b.parser.SetTableMapOptionalMetaDecodeFunc(b.cfg.TableMapOptionalMetaDecodeFunc)
+	}
+
 	b.running = false
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 
@@ -787,6 +792,8 @@ func (b *BinlogSyncer) onStream(s *BinlogStreamer) {
 }
 
 func (b *BinlogSyncer) parseEvent(s *BinlogStreamer, data []byte) error {
+	var e *BinlogEvent
+
 	//skip OK byte, 0x00
 	data = data[1:]
 
@@ -797,65 +804,70 @@ func (b *BinlogSyncer) parseEvent(s *BinlogStreamer, data []byte) error {
 		data = data[2:]
 	}
 
-	e, err := b.parser.Parse(data)
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	if e.Header.LogPos > 0 {
-		// Some events like FormatDescriptionEvent return 0, ignore.
-		b.nextPos.Pos = e.Header.LogPos
-	}
-
-	getCurrentGtidSet := func() GTIDSet {
-		if b.currGset == nil {
-			return nil
-		}
-		return b.currGset.Clone()
-	}
-
-	switch event := e.Event.(type) {
-	case *RotateEvent:
-		b.nextPos.Name = string(event.NextLogName)
-		b.nextPos.Pos = uint32(event.Position)
-		b.cfg.Logger.Infof("rotate to %s", b.nextPos)
-	case *GTIDEvent:
-		if b.prevGset == nil {
-			break
-		}
-		if b.currGset == nil {
-			b.currGset = b.prevGset.Clone()
-		}
-		u, _ := uuid.FromBytes(event.SID)
-		b.currGset.(*MysqlGTIDSet).AddGTID(u, event.GNO)
-		if b.prevMySQLGTIDEvent != nil {
-			u, _ = uuid.FromBytes(b.prevMySQLGTIDEvent.SID)
-			b.prevGset.(*MysqlGTIDSet).AddGTID(u, b.prevMySQLGTIDEvent.GNO)
-		}
-		b.prevMySQLGTIDEvent = event
-	case *MariadbGTIDEvent:
-		if b.prevGset == nil {
-			break
-		}
-		if b.currGset == nil {
-			b.currGset = b.prevGset.Clone()
-		}
-		prev := b.currGset.Clone()
-		err = b.currGset.(*MariadbGTIDSet).AddSet(&event.GTID)
+	if !b.cfg.ParseEnabled {
+		// b.cfg.Logger.Infof("skip parse event, len data:%v", len(data))
+		e = &BinlogEvent{RawData: data}
+	} else {
+		e, err := b.parser.Parse(data)
 		if err != nil {
 			return errors.Trace(err)
 		}
-		// right after reconnect we will see same gtid as we saw before, thus currGset will not get changed
-		if !b.currGset.Equal(prev) {
-			b.prevGset = prev
+
+		if e.Header.LogPos > 0 {
+			// Some events like FormatDescriptionEvent return 0, ignore.
+			b.nextPos.Pos = e.Header.LogPos
 		}
-	case *XIDEvent:
-		if !b.cfg.DiscardGTIDSet {
-			event.GSet = getCurrentGtidSet()
+
+		getCurrentGtidSet := func() GTIDSet {
+			if b.currGset == nil {
+				return nil
+			}
+			return b.currGset.Clone()
 		}
-	case *QueryEvent:
-		if !b.cfg.DiscardGTIDSet {
-			event.GSet = getCurrentGtidSet()
+
+		switch event := e.Event.(type) {
+		case *RotateEvent:
+			b.nextPos.Name = string(event.NextLogName)
+			b.nextPos.Pos = uint32(event.Position)
+			b.cfg.Logger.Infof("rotate to %s", b.nextPos)
+		case *GTIDEvent:
+			if b.prevGset == nil {
+				break
+			}
+			if b.currGset == nil {
+				b.currGset = b.prevGset.Clone()
+			}
+			u, _ := uuid.FromBytes(event.SID)
+			b.currGset.(*MysqlGTIDSet).AddGTID(u, event.GNO)
+			if b.prevMySQLGTIDEvent != nil {
+				u, _ = uuid.FromBytes(b.prevMySQLGTIDEvent.SID)
+				b.prevGset.(*MysqlGTIDSet).AddGTID(u, b.prevMySQLGTIDEvent.GNO)
+			}
+			b.prevMySQLGTIDEvent = event
+		case *MariadbGTIDEvent:
+			if b.prevGset == nil {
+				break
+			}
+			if b.currGset == nil {
+				b.currGset = b.prevGset.Clone()
+			}
+			prev := b.currGset.Clone()
+			err = b.currGset.(*MariadbGTIDSet).AddSet(&event.GTID)
+			if err != nil {
+				return errors.Trace(err)
+			}
+			// right after reconnect we will see same gtid as we saw before, thus currGset will not get changed
+			if !b.currGset.Equal(prev) {
+				b.prevGset = prev
+			}
+		case *XIDEvent:
+			if !b.cfg.DiscardGTIDSet {
+				event.GSet = getCurrentGtidSet()
+			}
+		case *QueryEvent:
+			if !b.cfg.DiscardGTIDSet {
+				event.GSet = getCurrentGtidSet()
+			}
 		}
 	}
 
